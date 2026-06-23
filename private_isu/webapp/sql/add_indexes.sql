@@ -6,3 +6,4 @@
 
 -- ALTER TABLE posts ADD INDEX idx_posts_created_at (created_at);
 -- ALTER TABLE posts ADD INDEX idx_posts_user_id (user_id);
+-- ALTER TABLE comments ADD INDEX idx_comments_user_id (user_id);
