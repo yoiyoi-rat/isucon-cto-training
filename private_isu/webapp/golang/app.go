@@ -69,6 +69,7 @@ type Comment struct {
 
 var memcacheClient *memcache.Client
 
+// アプリ起動時に一度だけ実行される初期化処理。Memcacheクライアントとセッションストアをセットアップする。
 func init() {
 	memdAddr := os.Getenv("ISUCONP_MEMCACHED_ADDRESS")
 	if memdAddr == "" {
@@ -79,6 +80,7 @@ func init() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 }
 
+// ベンチマーク開始前にDBをリセットする。余分なデータを削除し、一部ユーザーをBANフラグ付きにする。
 func dbInitialize(ctx context.Context) {
 	sqls := []string{
 		"DELETE FROM users WHERE id > 1000",
@@ -93,6 +95,7 @@ func dbInitialize(ctx context.Context) {
 	}
 }
 
+// アカウント名とパスワードでログインを試みる。認証成功ならUserを返し、失敗ならnilを返す。
 func tryLogin(ctx context.Context, accountName, password string) *User {
 	u := User{}
 	err := db.GetContext(ctx, &u, "SELECT * FROM users WHERE account_name = ? AND del_flg = 0", accountName)
@@ -107,31 +110,37 @@ func tryLogin(ctx context.Context, accountName, password string) *User {
 	}
 }
 
+// アカウント名（3文字以上の英数字_）とパスワード（6文字以上の英数字_）の形式を検証する。
 func validateUser(accountName, password string) bool {
 	return regexp.MustCompile(`\A[0-9a-zA-Z_]{3,}\z`).MatchString(accountName) &&
 		regexp.MustCompile(`\A[0-9a-zA-Z_]{6,}\z`).MatchString(password)
 }
 
+// 文字列をSHA-512でハッシュ化して16進数文字列で返す。パスワード保護に使う。
 func digest(src string) string {
 	h := sha512.New()
 	h.Write([]byte(src))
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+// アカウント名からソルト（パスワードハッシュに混ぜる値）を生成する。同じパスワードでもハッシュが一致しないようにするため。
 func calculateSalt(accountName string) string {
 	return digest(accountName)
 }
 
+// パスワードとソルトを組み合わせてDBに保存するハッシュ値を生成する。
 func calculatePasshash(accountName, password string) string {
 	return digest(password + ":" + calculateSalt(accountName))
 }
 
+// リクエストからMemcache上のセッションデータを取得する。
 func getSession(r *http.Request) *sessions.Session {
 	session, _ := store.Get(r, "isuconp-go.session")
 
 	return session
 }
 
+// セッションのuser_idからDBを引いてログイン中のユーザーを返す。未ログインなら空のUserを返す。
 func getSessionUser(r *http.Request) User {
 	ctx := r.Context()
 	session := getSession(r)
@@ -150,6 +159,7 @@ func getSessionUser(r *http.Request) User {
 	return u
 }
 
+// セッションから一度だけ表示するメッセージ（フラッシュメッセージ）を取り出して返す。取り出したら削除される。
 func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	session := getSession(r)
 	value, ok := session.Values[key]
@@ -163,6 +173,8 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 	}
 }
 
+// 投稿リストにコメント数・コメント・ユーザー情報を付加して返す。N+1を避けるため関連データをIN句で一括取得している。
+// allCommentsがfalseのときは各投稿のコメントを最新3件に絞る（トップページ用）。trueなら全件（詳細ページ用）。
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
 	if len(results) == 0 {
 		return nil, nil
@@ -267,6 +279,7 @@ func makePosts(ctx context.Context, results []Post, csrfToken string, allComment
 	return posts, nil
 }
 
+// 投稿のMIMEタイプから拡張子を決め、静的ファイルのURLパスを返す（例: /image/123.jpg）。
 func imageURL(p Post) string {
 	ext := ""
 	if p.Mime == "image/jpeg" {
@@ -280,10 +293,12 @@ func imageURL(p Post) string {
 	return "/image/" + strconv.Itoa(p.ID) + ext
 }
 
+// IDが0かどうかでログイン済みかを判定する（未ログインの場合はUser{}が返るためID=0になる）。
 func isLogin(u User) bool {
 	return u.ID != 0
 }
 
+// セッションからCSRFトークンを取得する。フォーム送信時の正規性チェックに使う。
 func getCSRFToken(r *http.Request) string {
 	session := getSession(r)
 	csrfToken, ok := session.Values["csrf_token"]
@@ -293,6 +308,7 @@ func getCSRFToken(r *http.Request) string {
 	return csrfToken.(string)
 }
 
+// 暗号的に安全なbバイトのランダム文字列を生成する。CSRFトークンの発行に使う。
 func secureRandomStr(b int) string {
 	k := make([]byte, b)
 	if _, err := crand.Read(k); err != nil {
@@ -301,16 +317,19 @@ func secureRandomStr(b int) string {
 	return fmt.Sprintf("%x", k)
 }
 
+// テンプレートファイルのパスを返すヘルパー（templates/ディレクトリからの相対パス）。
 func getTemplPath(filename string) string {
 	return path.Join("templates", filename)
 }
 
+// GET /initialize — ベンチマーク開始時に呼ばれる。DBを初期状態にリセットして200を返す。
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	dbInitialize(ctx)
 	w.WriteHeader(http.StatusOK)
 }
 
+// GET /login — ログインページを表示する。すでにログイン済みならトップページへリダイレクト。
 func getLogin(w http.ResponseWriter, r *http.Request) {
 	me := getSessionUser(r)
 
@@ -328,6 +347,7 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 	}{me, getFlash(w, r, "notice")})
 }
 
+// POST /login — フォームのaccount_nameとpasswordで認証し、成功ならセッションを作成してトップページへ。
 func postLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if isLogin(getSessionUser(r)) {
@@ -353,6 +373,7 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// GET /register — ユーザー登録ページを表示する。すでにログイン済みならトップページへリダイレクト。
 func getRegister(w http.ResponseWriter, r *http.Request) {
 	if isLogin(getSessionUser(r)) {
 		http.Redirect(w, r, "/", http.StatusFound)
@@ -368,6 +389,7 @@ func getRegister(w http.ResponseWriter, r *http.Request) {
 	}{User{}, getFlash(w, r, "notice")})
 }
 
+// POST /register — アカウント名・パスワードを受け取り、バリデーション・重複確認を経てユーザーを作成する。
 func postRegister(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	if isLogin(getSessionUser(r)) {
@@ -420,6 +442,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// GET /logout — セッションを破棄してトップページへリダイレクトする。
 func getLogout(w http.ResponseWriter, r *http.Request) {
 	session := getSession(r)
 	delete(session.Values, "user_id")
@@ -429,6 +452,7 @@ func getLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
+// GET / — トップページ。全投稿を新着順で取得し、makePosts経由でコメント・ユーザー情報を付けてHTMLを返す。
 func getIndex(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := getSessionUser(r)
@@ -464,6 +488,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 	}{posts, me, getCSRFToken(r), getFlash(w, r, "notice")})
 }
 
+// GET /@{accountName} — ユーザープロフィールページ。そのユーザーの投稿一覧・投稿数・コメント数・被コメント数を表示する。
 func getAccountName(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	accountName := r.PathValue("accountName")
@@ -551,6 +576,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 	}{posts, user, postCount, commentCount, commentedCount, me})
 }
 
+// GET /posts?max_created_at=... — 無限スクロール用。指定日時以前の投稿をHTMLフラグメントで返す。
 func getPosts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	m, err := url.ParseQuery(r.URL.RawQuery)
@@ -598,6 +624,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 	)).Execute(w, posts)
 }
 
+// GET /posts/{id} — 投稿詳細ページ。コメントを全件表示する（makePosts に allComments=true を渡す）。
 func getPostsID(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pidStr := r.PathValue("id")
@@ -643,6 +670,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 	}{p, me})
 }
 
+// POST / — 新規投稿を作成する。画像ファイルをバリデーションしてDBに保存し、public/imageへファイルとして書き出す。
 func postIndex(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := getSessionUser(r)
@@ -733,6 +761,7 @@ func postIndex(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/posts/"+strconv.FormatInt(pid, 10), http.StatusFound)
 }
 
+// POST /comment — ログイン中のユーザーが指定投稿にコメントを追加する。
 func postComment(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := getSessionUser(r)
@@ -762,6 +791,7 @@ func postComment(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, fmt.Sprintf("/posts/%d", postID), http.StatusFound)
 }
 
+// GET /admin/banned — 管理者専用。BANされていない一般ユーザー一覧を表示する。非管理者は403を返す。
 func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := getSessionUser(r)
@@ -792,6 +822,7 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 	}{users, me, getCSRFToken(r)})
 }
 
+// POST /admin/banned — 管理者専用。選択されたユーザーのdel_flgを1にしてBANする。
 func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me := getSessionUser(r)
@@ -825,6 +856,7 @@ func postAdminBanned(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/banned", http.StatusFound)
 }
 
+// アプリのエントリーポイント。DB接続を確立し、ルーティングを設定して:8080でHTTPサーバーを起動する。
 func main() {
 	host := os.Getenv("ISUCONP_DB_HOST")
 	if host == "" {
