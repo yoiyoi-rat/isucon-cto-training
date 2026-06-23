@@ -322,6 +322,21 @@ func getTemplPath(filename string) string {
 	return path.Join("templates", filename)
 }
 
+var templates map[string]*template.Template
+
+func initTemplates() {
+	fmap := template.FuncMap{"imageURL": imageURL}
+	templates = map[string]*template.Template{
+		"login":    template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("login.html"))),
+		"register": template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("register.html"))),
+		"banned":   template.Must(template.ParseFiles(getTemplPath("layout.html"), getTemplPath("banned.html"))),
+		"index":    template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("index.html"), getTemplPath("posts.html"), getTemplPath("post.html"))),
+		"user":     template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("user.html"), getTemplPath("posts.html"), getTemplPath("post.html"))),
+		"posts":    template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(getTemplPath("posts.html"), getTemplPath("post.html"))),
+		"post_id":  template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(getTemplPath("layout.html"), getTemplPath("post_id.html"), getTemplPath("post.html"))),
+	}
+}
+
 // GET /initialize — ベンチマーク開始時に呼ばれる。DBを初期状態にリセットして200を返す。
 func getInitialize(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -338,10 +353,7 @@ func getLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("login.html")),
-	).Execute(w, struct {
+	templates["login"].Execute(w, struct {
 		Me    User
 		Flash string
 	}{me, getFlash(w, r, "notice")})
@@ -380,10 +392,7 @@ func getRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("register.html")),
-	).Execute(w, struct {
+	templates["register"].Execute(w, struct {
 		Me    User
 		Flash string
 	}{User{}, getFlash(w, r, "notice")})
@@ -471,16 +480,7 @@ func getIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("index.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	templates["index"].Execute(w, struct {
 		Posts     []Post
 		Me        User
 		CSRFToken string
@@ -557,16 +557,7 @@ func getAccountName(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("user.html"),
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	templates["user"].Execute(w, struct {
 		Posts          []Post
 		User           User
 		PostCount      int
@@ -614,14 +605,7 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("posts.html").Funcs(fmap).ParseFiles(
-		getTemplPath("posts.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, posts)
+	templates["posts"].Execute(w, posts)
 }
 
 // GET /posts/{id} — 投稿詳細ページ。コメントを全件表示する（makePosts に allComments=true を渡す）。
@@ -656,15 +640,7 @@ func getPostsID(w http.ResponseWriter, r *http.Request) {
 
 	me := getSessionUser(r)
 
-	fmap := template.FuncMap{
-		"imageURL": imageURL,
-	}
-
-	template.Must(template.New("layout.html").Funcs(fmap).ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("post_id.html"),
-		getTemplPath("post.html"),
-	)).Execute(w, struct {
+	templates["post_id"].Execute(w, struct {
 		Post Post
 		Me   User
 	}{p, me})
@@ -812,10 +788,7 @@ func getAdminBanned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	template.Must(template.ParseFiles(
-		getTemplPath("layout.html"),
-		getTemplPath("banned.html")),
-	).Execute(w, struct {
+	templates["banned"].Execute(w, struct {
 		Users     []User
 		Me        User
 		CSRFToken string
@@ -897,6 +870,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %s.", err.Error())
 	}
+
+	initTemplates()
 	defer db.Close()
 
 	r := chi.NewRouter()
