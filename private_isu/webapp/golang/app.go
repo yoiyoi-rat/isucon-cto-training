@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	crand "crypto/rand"
+	"crypto/sha512"
 	"fmt"
 	"html/template"
 	"io"
@@ -10,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"regexp"
 	"strconv"
@@ -100,7 +100,7 @@ func tryLogin(ctx context.Context, accountName, password string) *User {
 		return nil
 	}
 
-	if calculatePasshash(ctx, u.AccountName, password) == u.Passhash {
+	if calculatePasshash(u.AccountName, password) == u.Passhash {
 		return &u
 	} else {
 		return nil
@@ -112,30 +112,18 @@ func validateUser(accountName, password string) bool {
 		regexp.MustCompile(`\A[0-9a-zA-Z_]{6,}\z`).MatchString(password)
 }
 
-// 今回のGo実装では言語側のエスケープの仕組みが使えないのでOSコマンドインジェクション対策できない
-// 取り急ぎPHPのescapeshellarg関数を参考に自前で実装
-// cf: http://jp2.php.net/manual/ja/function.escapeshellarg.php
-func escapeshellarg(arg string) string {
-	return "'" + strings.Replace(arg, "'", "'\\''", -1) + "'"
+func digest(src string) string {
+	h := sha512.New()
+	h.Write([]byte(src))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func digest(ctx context.Context, src string) string {
-	// opensslのバージョンによっては (stdin)= というのがつくので取る
-	out, err := exec.CommandContext(ctx, "/bin/bash", "-c", `printf "%s" `+escapeshellarg(src)+` | openssl dgst -sha512 | sed 's/^.*= //'`).Output()
-	if err != nil {
-		log.Print(err)
-		return ""
-	}
-
-	return strings.TrimSuffix(string(out), "\n")
+func calculateSalt(accountName string) string {
+	return digest(accountName)
 }
 
-func calculateSalt(ctx context.Context, accountName string) string {
-	return digest(ctx, accountName)
-}
-
-func calculatePasshash(ctx context.Context, accountName, password string) string {
-	return digest(ctx, password+":"+calculateSalt(ctx, accountName))
+func calculatePasshash(accountName, password string) string {
+	return digest(password + ":" + calculateSalt(accountName))
 }
 
 func getSession(r *http.Request) *sessions.Session {
@@ -360,7 +348,7 @@ func postRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := "INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)"
-	result, err := db.ExecContext(ctx, query, accountName, calculatePasshash(ctx, accountName, password))
+	result, err := db.ExecContext(ctx, query, accountName, calculatePasshash(accountName, password))
 	if err != nil {
 		log.Print(err)
 		return
