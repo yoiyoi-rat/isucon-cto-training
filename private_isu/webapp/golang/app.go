@@ -164,43 +164,96 @@ func getFlash(w http.ResponseWriter, r *http.Request, key string) string {
 }
 
 func makePosts(ctx context.Context, results []Post, csrfToken string, allComments bool) ([]Post, error) {
-	var posts []Post
+	if len(results) == 0 {
+		return nil, nil
+	}
 
+	// Step1: 全投稿IDを集める
+	postIDs := make([]int, len(results))
+	for i, p := range results {
+		postIDs[i] = p.ID
+	}
+
+	// Step2: コメント数を一括取得（20回 → 1回）
+	type commentCount struct {
+		PostID int `db:"post_id"`
+		Count  int `db:"count"`
+	}
+	var counts []commentCount
+	q, args, err := sqlx.In("SELECT `post_id`, COUNT(*) AS `count` FROM `comments` WHERE `post_id` IN (?) GROUP BY `post_id`", postIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.SelectContext(ctx, &counts, q, args...); err != nil {
+		return nil, err
+	}
+	commentCountMap := make(map[int]int, len(counts))
+	for _, c := range counts {
+		commentCountMap[c.PostID] = c.Count
+	}
+
+	// Step3: コメントを一括取得（20回 → 1回）
+	var allCommentList []Comment
+	q, args, err = sqlx.In("SELECT * FROM `comments` WHERE `post_id` IN (?) ORDER BY `post_id`, `created_at` DESC", postIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.SelectContext(ctx, &allCommentList, q, args...); err != nil {
+		return nil, err
+	}
+
+	// Step4: post_idごとに振り分け（!allCommentsなら3件まで）
+	commentMap := make(map[int][]Comment)
+	for _, c := range allCommentList {
+		if allComments || len(commentMap[c.PostID]) < 3 {
+			commentMap[c.PostID] = append(commentMap[c.PostID], c)
+		}
+	}
+
+	// Step5: 必要なユーザーIDを全部集める（重複なし）
+	userIDSet := make(map[int]struct{})
 	for _, p := range results {
-		err := db.GetContext(ctx, &p.CommentCount, "SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?", p.ID)
-		if err != nil {
-			return nil, err
+		userIDSet[p.UserID] = struct{}{}
+	}
+	for _, comments := range commentMap {
+		for _, c := range comments {
+			userIDSet[c.UserID] = struct{}{}
 		}
+	}
+	userIDs := make([]int, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
 
-		query := "SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC"
-		if !allComments {
-			query += " LIMIT 3"
-		}
-		var comments []Comment
-		err = db.SelectContext(ctx, &comments, query, p.ID)
-		if err != nil {
-			return nil, err
-		}
+	// Step6: ユーザーを一括取得（最大80回 → 1回）
+	var users []User
+	q, args, err = sqlx.In("SELECT * FROM `users` WHERE `id` IN (?)", userIDs)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.SelectContext(ctx, &users, q, args...); err != nil {
+		return nil, err
+	}
+	userMap := make(map[int]User, len(users))
+	for _, u := range users {
+		userMap[u.ID] = u
+	}
 
-		for i := range comments {
-			err := db.GetContext(ctx, &comments[i].User, "SELECT * FROM `users` WHERE `id` = ?", comments[i].UserID)
-			if err != nil {
-				return nil, err
-			}
-		}
+	// Step7: 組み立て（DBアクセスなし）
+	var posts []Post
+	for _, p := range results {
+		p.CommentCount = commentCountMap[p.ID]
 
-		// reverse
+		comments := commentMap[p.ID]
 		for i, j := 0, len(comments)-1; i < j; i, j = i+1, j-1 {
 			comments[i], comments[j] = comments[j], comments[i]
 		}
-
+		for i := range comments {
+			comments[i].User = userMap[comments[i].UserID]
+		}
 		p.Comments = comments
 
-		err = db.GetContext(ctx, &p.User, "SELECT * FROM `users` WHERE `id` = ?", p.UserID)
-		if err != nil {
-			return nil, err
-		}
-
+		p.User = userMap[p.UserID]
 		p.CSRFToken = csrfToken
 
 		if p.User.DelFlg == 0 {
